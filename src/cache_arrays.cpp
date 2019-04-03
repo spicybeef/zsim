@@ -26,6 +26,149 @@
 #include "cache_arrays.h"
 #include "hash.h"
 #include "repl_policies.h"
+#include "zsim.h"
+
+/* NVM set-associative cache array */
+
+// A lookup table to return how many bits the index has high
+const uint8_t NvmArray::numBitsLut[] = 
+{
+    0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8,
+};
+
+NvmArray::NvmArray(uint32_t _numLines, uint32_t _assoc, ReplPolicy* _rp, HashFamily* _hf) : rp(_rp), hf(_hf), numLines(_numLines), assoc(_assoc) {
+    lineBits = ilog2(zinfo->lineSize);
+    array = gm_calloc<Address>(numLines);
+    numSets = numLines/assoc;
+    setMask = numSets - 1;
+
+    // Raw data init
+    for (uint32_t line = 0; line < numLines; line++) {
+        // Create a vector of bytes the size of the cache line
+        std::vector<uint8_t> lineBytes(1 << lineBits, 0);
+        rawDat.push_back(lineBytes);
+    }
+
+    // Project statistics
+    // HDF5 did not want to cooperate with the large amount of data required
+    // to track bit flips for each bit in a cache's lines so the statistics
+    // are stored by themselves in a 2D vector which will be dumped later.
+    for (uint32_t line = 0; line < numLines; line++) {
+        // Create a 64bit counter for every bit in the line
+        std::vector<uint64_t> lineCounters((1 << lineBits), 0);
+        zinfo->lineBitStats.push_back(lineCounters);
+    }
+
+    // Update our hacked-in data dumper parameters
+    zinfo->nvmCacheNumLines = numLines;
+
+    assert_msg(isPow2(numSets), "must have a power of 2 # sets, but you specified %d", numSets);
+}
+
+int32_t NvmArray::lookup(const Address lineAddr, const MemReq* req, bool updateReplacement) {
+    uint32_t set = hf->hash(0, lineAddr) & setMask;
+    uint32_t first = set*assoc;
+    for (uint32_t id = first; id < first + assoc; id++) {
+        if (array[id] ==  lineAddr) {
+            if (updateReplacement) rp->update(id, req);
+            return id;
+        }
+    }
+    return -1;
+}
+
+uint32_t NvmArray::preinsert(const Address lineAddr, const MemReq* req, Address* wbLineAddr) { //TODO: Give out valid bit of wb cand?
+    uint32_t set = hf->hash(0, lineAddr) & setMask;
+    uint32_t first = set*assoc;
+
+    uint32_t candidate = rp->rankCands(req, SetAssocCands(first, first+assoc));
+
+    *wbLineAddr = array[candidate];
+
+#if 0 // This doesn't work 100% because when we're evicting, some of these lines become invalid memory accesses.
+    char data[128];
+    int offset = 0;
+    uint8_t zeroes[64] = {0x00}; // Just 64 bytes of zeroes
+    uint64_t realAddr = (*wbLineAddr << lineBits);
+    uint64_t pointer;
+
+    // Don't reference a null pointer, so point to a bunch of zeroes instead. We
+    // will assume an invalid entry (the only time you'd have a null pointer)
+    // will be full of zeroes.
+    if(!(uint64_t*)(realAddr))
+    {
+        pointer = (uint64_t)zeroes;
+    }
+    else
+    {
+        pointer = realAddr;
+    }
+
+    for(int i = 0; i < 64; i++)
+    {
+        offset += sprintf((char*)(data + offset), "%02x", (uint8_t)*((uint64_t*)(pointer+i)));
+    }
+    info("EVT: %5d of %5d 0x%016lx %s", candidate, numLines, realAddr, data);
+#endif
+
+    return candidate;
+}
+
+void NvmArray::postinsert(const Address lineAddr, const MemReq* req, uint32_t candidate) {
+    rp->replaced(candidate);
+    array[candidate] = lineAddr;
+    rp->update(candidate, req);
+
+    uint8_t lineBytes[64];
+
+    // Get the real address by shifting left by lineBits
+    uint64_t realAddr = (req->lineAddr << lineBits);
+    // Copy line to our local copy
+    memcpy(lineBytes, (uint8_t*)(realAddr), (uint32_t)(1 << lineBits));
+
+    // Count how many bit flips we had in each of the line's bytes
+    for (uint32_t byte = 0; byte < (uint32_t)(1 << lineBits); byte++) {
+        // XOR the old vs. the new value, and use the LUT to determine how many bits were flipped
+        zinfo->lineBitStats[candidate][byte] += numBitsLut[rawDat[candidate][byte]^lineBytes[byte]];
+        // info("lineBitStats[%6d][0x%02x] = %ld", candidate, byte, zinfo->lineBitStats[candidate][byte]);
+        // Move the pointer to the word we're updating
+        // outFile.seekp(candidate * (1 << lineBits) * sizeof(uint64_t) + byte * sizeof(uint64_t), std::ios::beg);
+        // outFile.write(reinterpret_cast<const char*>(&lineBitStats[candidate][byte]), sizeof(uint64_t));
+        // load the new value into our local copy
+        rawDat[candidate][byte] = lineBytes[byte];
+    }
+
+#if 0
+    // Show inserted data
+    char data[128];
+    uint32_t offset = 0;
+    for(uint32_t i = 0; i < (uint32_t)(1 << lineBits); i++) {
+        offset += sprintf((char*)(data + offset), "%02x", lineBytes[i]);
+    }
+    info("INS: %5d of %5d 0x%016lx %s", candidate, numLines, realAddr, data);
+#endif
+}
+
+void NvmArray::initStats(AggregateStat* parentStat){
+    AggregateStat* objStats = new AggregateStat();
+    objStats->init("array", "NvmArray stats");
+    parentStat->append(objStats);
+}
 
 /* Set-associative array implementation */
 
@@ -63,6 +206,7 @@ void SetAssocArray::postinsert(const Address lineAddr, const MemReq* req, uint32
     array[candidate] = lineAddr;
     rp->update(candidate, req);
 }
+
 
 
 /* ZCache implementation */

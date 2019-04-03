@@ -102,9 +102,12 @@ BaseCache* BuildCacheBank(Config& config, const string& prefix, g_string& name, 
     uint32_t ways = config.get<uint32_t>(prefix + "array.ways", 4);
     string arrayType = config.get<const char*>(prefix + "array.type", "SetAssoc");
     uint32_t candidates = (arrayType == "Z")? config.get<uint32_t>(prefix + "array.candidates", 16) : ways;
+    info("Cache bank candidates: %d", candidates);
 
     //Need to know number of hash functions before instantiating array
     if (arrayType == "SetAssoc") {
+        numHashes = 1;
+    } else if (arrayType == "Nvm") {
         numHashes = 1;
     } else if (arrayType == "Z") {
         numHashes = ways;
@@ -223,6 +226,8 @@ BaseCache* BuildCacheBank(Config& config, const string& prefix, g_string& name, 
         //Schedule its tick
         uint32_t interval = config.get<uint32_t>(prefix + "repl.interval", 5000); //phases
         zinfo->eventQueue->insert(new Partitioner::PartitionEvent(p, interval));
+    } else if (replType == "SRRIP") {
+        rp = new SRRIPReplPolicy(numLines, 0);
     } else {
         panic("%s: Invalid replacement type %s", name.c_str(), replType.c_str());
     }
@@ -233,6 +238,8 @@ BaseCache* BuildCacheBank(Config& config, const string& prefix, g_string& name, 
     CacheArray* array = nullptr;
     if (arrayType == "SetAssoc") {
         array = new SetAssocArray(numLines, ways, rp, hf);
+    } else if (arrayType == "Nvm") {
+        array = new NvmArray(numLines, ways, rp, hf);
     } else if (arrayType == "Z") {
         array = new ZArray(numLines, ways, candidates, rp, hf);
     } else if (arrayType == "IdealLRU") {
@@ -519,7 +526,7 @@ static void InitSystem(Config& config) {
     }
 
     //Connect everything
-    bool printHierarchy = config.get<bool>("sim.printHierarchy", false);
+    bool printHierarchy = config.get<bool>("sim.printHierarchy", true);
 
     // mem to llc is a bit special, only one llc
     uint32_t childId = 0;

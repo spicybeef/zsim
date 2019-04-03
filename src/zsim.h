@@ -28,6 +28,7 @@
 
 #include <stdint.h>
 #include <sys/time.h>
+#include <vector>
 #include "constants.h"
 #include "debug.h"
 #include "locks.h"
@@ -181,6 +182,12 @@ struct GlobSimInfo {
     // Trace-driven simulation (no cores)
     bool traceDriven;
     TraceDriver* traceDriver;
+
+    // NvmCache bit flip statistics
+    // A 2D array of 64-bit counters that count how many bits of each line's bytes has been flipped
+    uint32_t nvmCacheNumLines;
+    uint32_t nvmCacheLineSize;
+    std::vector<std::vector<uint64_t>> lineBitStats;
 };
 
 

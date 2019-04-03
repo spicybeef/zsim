@@ -26,8 +26,12 @@
 #ifndef CACHE_ARRAYS_H_
 #define CACHE_ARRAYS_H_
 
+#include <fstream>
+
 #include "memory_hierarchy.h"
 #include "stats.h"
+
+#define NVM_CACHE_RAWDAT_FILENAME   "nvmCacheRaw.dat"
 
 /* General interface of a cache array. The array is a fixed-size associative container that
  * translates addresses to line IDs. A line ID represents the position of the tag. The other
@@ -53,6 +57,35 @@ class CacheArray : public GlobAlloc {
 
 class ReplPolicy;
 class HashFamily;
+
+/* NVM set-associative cache array */
+class NvmArray : public CacheArray {
+    protected:
+        Address* array;
+        ReplPolicy* rp;
+        HashFamily* hf;
+        uint32_t numLines;
+        uint32_t numSets;
+        uint32_t assoc;
+        uint32_t setMask;
+
+        VectorCounter lineStats; // A counter that keeps track of how many times a line has been replaced
+
+        // A 2D array of lines and their raw data
+        std::vector<std::vector<uint8_t>> rawDat;
+
+    public:
+
+        NvmArray(uint32_t _numLines, uint32_t _assoc, ReplPolicy* _rp, HashFamily* _hf);
+
+        int32_t lookup(const Address lineAddr, const MemReq* req, bool updateReplacement);
+        uint32_t preinsert(const Address lineAddr, const MemReq* req, Address* wbLineAddr);
+        void postinsert(const Address lineAddr, const MemReq* req, uint32_t candidate);
+        void initStats(AggregateStat* parentStat);
+
+    private:
+        static const uint8_t numBitsLut[]; // A lookup table to return how many bits the index has high
+};
 
 /* Set-associative cache array */
 class SetAssocArray : public CacheArray {

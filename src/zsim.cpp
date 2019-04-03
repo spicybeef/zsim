@@ -40,6 +40,7 @@
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <fstream>
 #include "access_tracing.h"
 #include "constants.h"
 #include "contention_sim.h"
@@ -1120,6 +1121,24 @@ VOID SimEnd() {
 
     //Uncomment when debugging termination races, which can be rare because they are triggered by threads of a dying process
     //sleep(5);
+    
+    // Dump NvmCache stats to file
+    // Write out empty data to the file
+    std::ofstream outFile; // The file to write the cache bit flip statistics to
+    uint64_t zero = 0;
+    #define NVM_CACHE_RAWDAT_FILENAME   "nvmCacheRaw.dat"
+    outFile.open(NVM_CACHE_RAWDAT_FILENAME, std::ios::out | std::ios::binary);
+    for (uint32_t i = 0; i < zinfo->nvmCacheNumLines * zinfo->lineSize; i++) {
+        outFile.write(reinterpret_cast<const char*>(&zero), sizeof(uint64_t));
+    }
+    for (uint32_t line = 0; line < zinfo->nvmCacheNumLines; line++) {
+        for (uint32_t lineByte = 0; lineByte < zinfo->lineSize; lineByte++) {
+            outFile.seekp(line * zinfo->lineSize * sizeof(uint64_t) + lineByte * sizeof(uint64_t), std::ios::beg);
+            outFile.write(reinterpret_cast<const char*>(&zinfo->lineBitStats[line][lineByte]), sizeof(uint64_t));
+        }
+    }
+    // Close the file
+    outFile.close();
 
     exit(0);
 }
@@ -1518,7 +1537,8 @@ int main(int argc, char *argv[]) {
     CPU_SET(procIdx % 8, &cpuset);
     int result = sched_setaffinity(getpid(), sizeof(cpu_set_t), &cpuset);
     info("Affinity result %d", result);*/
-
+    
+    info("lineBits: %d", lineBits);
     info("procMask: 0x%lx", procMask);
 
     if (zinfo->sched) zinfo->sched->processCleanup(procIdx);

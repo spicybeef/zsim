@@ -139,7 +139,7 @@ ProcStats::ProcStats(AggregateStat* parentStat, AggregateStat* _coreStats) : cor
         Stat* s = coreStats->get(i);
         AggregateStat* as = dynamic_cast<AggregateStat*>(s);
         auto err = [s](const char* reason) {
-            panic("Stat %s is not per-core (%s)", s->name(), reason);
+            // panic("Stat %s is not per-core (%s)", s->name(), reason);
         };
         if (!as) err("not aggregate stat");
         if (!as->isRegular()) err("irregular aggregate");
